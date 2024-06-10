@@ -57,8 +57,7 @@ require(quantregForest)
 ###  Set Working Directory and Define Paths
 
 ```{r cache=FALSE,message=FALSE,warning=FALSE}
-work_dir <- "~/Desktop/CIAT_JobApplication/Candidate_Test"
-#work_dir <- "/media/jemal/EIAR_ASIS/CIAT_JobApplication/Candidate_Test"
+work_dir <- "../"
 Country <- "Nigeria"
 Crop <- "maize"
 
