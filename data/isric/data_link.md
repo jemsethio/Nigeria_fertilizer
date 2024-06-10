@@ -1,0 +1,1 @@
+https://files.isric.org/soilgrids/latest/data_aggregated/
