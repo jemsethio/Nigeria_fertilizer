@@ -1,0 +1,557 @@
+---
+title: "Developing Climate-Smart Fertilizer Recommendations for Maize Growers in Nigeria"
+author: "Your Name"
+date: "2024-06-09"
+output: html_document
+---
+
+# Introduction
+
+In the quest to enhance agricultural productivity and sustainability, providing tailored fertilizer recommendations is crucial. This report focuses on developing climate-smart fertilizer advice for maize growers in Nigeria using legacy field trials data of Carob (https://carob-data.org/) By analyzing yield responses to key nutrients—nitrogen (N), phosphorus (P), and potassium (K)—and incorporating spatial variations in soil and weather conditions, we aim to deliver site-specific recommendations that optimize maize yield and minimize environmental impact.
+
+The analytical workflow encompasses data acquisition, cleaning, and subsetting, followed by a comprehensive exploratory data analysis (EDA) to understand the main characteristics in the data. In this present project, we used the standard machine learning models that analyze various soil features like N, P, K, soil pH, and environmental parameters such as temperature, rainfall indices of particular land area to recommend the type of fertilizer to be used for the maize crop over Nigeria. Therefore, the present project has been proposed to analyze available datasets and to predict optimal fertilizer requirements for maize crops based on soil features and environmental parameters using machine learning models.
+
+This report documents each step of the process, presenting the findings. Additionally, it outlines a technical roadmap for integrating generative AI to further enhance the delivery of agronomic advisories and climate services to farmers.
+
+###  Analytical Workflow
+Analytical Workflow
+
+ * Data Collection
+ 
+      * A critical component of this study involves the integration of detailed soil and bioclimate variables covariates. The soil variables, obtained from the ISRIC Soil Data Hub, including  Bulk density, Cation exchange capacity, Clay content, Soil organic carbon other variables are downloaded. In addition to soil data, a climate variables play a crucial role in determining the appropriate fertilizer recommendations. I used the bioclimate variables based on historical average which represent the average or normal climate condition, which includes temperature, precipitation indices were download from the world climate data portal. This section handled by a separate r scripts
+ *  Data Preprocessing
+      * Data Cleaning: Remove duplicates, handle missing values, and correct errors in the dataset.
+      * Data Transformation: Normalize or standardize data, encode categorical variables, and create new features if necessary.
+      * Data Integration: Combine data from various sources to create a comprehensive dataset for analysis.
+ *  Exploratory Data Analysis (EDA)
+      * Descriptive Statistics: Calculate mean, median, standard deviation, and other descriptive statistics.
+      * Visualization: Use plots (histograms, box plots, scatter plots, heatmaps) to understand data distributions and relationships.
+      * Correlation Analysis: Identify correlations between soil properties, weather parameters, and yield outcomes.
+ *  Feature selection
+      * Feature Selection: Identify the most relevant features for predicting fertilizer needs.
+      * Feature Creation: Create new features based on domain knowledge, such as interaction terms or polynomial features.
+ *  Model development
+      * In this project we are dealing with a classification problem. Therefore we have fitted our dataset into few popular machine learning models such as K-Nearest Neighbors, Decision Tree, Random Forest and Gradient Boosting to predict fertilizer recommendation for maize. Finally, we will select one models based on  accuracy and precision.  based on the training data first I mange to identify the most important features influencing fertilizer recommendations. the we use the fitted vale to predicted the optimum fertilizer rate. finally, the predicted optimum rate of fertilizer aggregated at admin 3 level.  
+
+
+### Load necessary library 
+
+```{r setup, cache=FALSE,message=FALSE,warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# Load necessary libraries
+library(tidyverse)
+library(ggplot2)
+library(sf)  
+require(sp)
+require(rgdal)
+require(raster)
+require(caret)
+require(dplyr)
+require(ranger)
+require(randomForest)
+require(hydroGOF)
+require(Metrics)
+require(quantregForest)
+
+```
+###  Set Working Directory and Define Paths
+
+```{r cache=FALSE,message=FALSE,warning=FALSE}
+work_dir <- "~/Desktop/CIAT_JobApplication/Candidate_Test"
+#work_dir <- "/media/jemal/EIAR_ASIS/CIAT_JobApplication/Candidate_Test"
+Country <- "Nigeria"
+Crop <- "maize"
+
+setwd(work_dir)
+
+# define path for input and output
+pathIn <- paste(work_dir ,"/data/carob_fertilizer-cc/", sep="")
+pathOut1 <- paste(work_dir ,"/data/", Country, "/", Crop, "/result/", sep="")
+pathOut2 <- paste(work_dir ,"/data/", Country, "/", Crop, "/raw/", sep = "")
+
+# create output folder 
+if (!dir.exists(pathOut1)){
+  dir.create(file.path(pathOut1), recursive = TRUE)
+}
+if (!dir.exists(pathOut2)){
+  dir.create(file.path(pathOut2), recursive = TRUE)
+}
+
+```
+
+
+
+## Data cleaning 
+
+```{r cache=FALSE,warning=FALSE}
+## Load the dataset
+Carob_data <- read.csv(paste(pathIn, "carob_fertilizer-cc.csv", sep=""), stringsAsFactors = FALSE)# read the data downloaded from Carob
+#str(Carob_data)
+
+# Subset data for maize trials in Nigeria
+nigeria_maize_data <- Carob_data %>% filter(country == Country)  %>% 
+                                filter(crop == Crop) %>% 
+                                filter(yield_part == "grain")
+          
+
+#summary(nigeria_maize_data)
+
+# Treat empty strings as missing values
+nigeria_maize_data[nigeria_maize_data == ""] <- NA
+
+# Calculate percentage of missing data for each variable
+missing_data_percentage <- sapply(nigeria_maize_data, function(x) mean(is.na(x)) * 100)
+missing_data_df <- data.frame(Variable = names(missing_data_percentage), Missing_Percentage = round(missing_data_percentage,0))
+print(missing_data_df)
+
+```
+
+Most of the data has a missing value, so i decided to remove those variable has 30% missing data 
+```{r cache=FALSE,warning=FALSE}
+# Remove variables with more than 20% missing data
+threshold <- 30
+nigeria_maize_data <- nigeria_maize_data[, colMeans(is.na(nigeria_maize_data)) * 100 <= threshold]
+
+# Recalculate the percentage of missing data for the filtered dataset
+filtered_missing_data_percentage <- sapply(nigeria_maize_data, function(x) mean(is.na(x)) * 100)
+filtered_missing_data_df <- data.frame(Variable = names(filtered_missing_data_percentage), Missing_Percentage =  round(filtered_missing_data_percentage,2))
+print(filtered_missing_data_df)
+
+# Select relevant variables which have <= 30% missing data and only focus on the grain yield 
+selected_data <- nigeria_maize_data %>% 
+                      dplyr::select(filtered_missing_data_df$Variable)
+```
+The soil type has almost 80% missing data, therefore global GLDAS Soil Texture https://ldas.gsfc.nasa.gov/gldas/soils. This data uses the FAO 16-category soil texture class 
+
+```{r cache=FALSE,warning=FALSE}
+
+# download.file(url = "https://ldas.gsfc.nasa.gov/sites/default/files/ldas/gldas/SOILS/GLDASp5_soiltexture_025d.nc4",destfile = "../data/GLDASp5_soiltexture_025d.nc4")
+# soil_txture_class <- raster("../data/GLDASp5_soiltexture_025d.nc4")
+# coordinates(selected_data) <- c("longitude","latitude")
+# soilclass = raster::extract(soil_txture_class,selected_data, convert = T,df=T)
+# names(soilclass) <- c("ID", "soilID")
+# 
+# 
+# soil_class_map <- data_frame(soilID=c(1:16), soil_type =c("Sand", "Loamy Sand", "Sandy Loam", "Silt Loam", "Silt", "Loam", "Sandy Clay Loam", 
+#                     "Silty Clay Loam", "Clay Loam", "Sandy Clay", "Silty Clay", "Clay", 
+#                     "Organic Materials", "Water", "Bedrock", "Other"))
+# # Join the extracted values with their descriptions
+# mapped_soil_df <- soilclass %>%
+#   left_join(soil_class_map, by = c("soilID" = "soilID"))
+# 
+# selected_data <- data.frame(selected_data, soil_type = mapped_soil_df$soil_type)
+
+##clean the missing data in the soiltype 
+# selected_data <- na.omit(selected_data)
+# sapply(selected_data, function(x) mean(is.na(x)) * 100)
+# 
+# # Handle missing values and outliers
+# selected_data <- selected_data %>% 
+#   mutate(across(where(is.numeric), ~ ifelse(is.na(.), median(., na.rm = TRUE), .)))
+# 
+# # rename and standardize the column names to match the data from OFRA
+# ds <- selected_data %>%
+#   dplyr::rename(lon = longitude,
+#                 lat = latitude,
+#                 var = variety,
+#                 N = N_fertilizer,
+#                 P = P_fertilizer,
+#                 K = K_fertilizer,
+#                 TY = yield,
+#                 dsID = dataset_id,
+#                 #year = year,
+#                 TLID = trial_id,
+#                 Treatment= treatment,
+#                 SoilType = soil_type) %>%
+#   dplyr::select(dsID,TLID,lat,lon,N,P,K,TY,Treatment,SoilType,var)%>%
+#   dplyr::mutate(N = round(N, 0),
+#                 P = round(P, 0),
+#                 K = round(K, 0)) %>%
+#   dplyr::mutate(Treatment = as.factor(Treatment),
+#                 SoilType = as.factor(SoilType),
+#                 var = as.factor(var))%>%
+#   dplyr::select(TLID,lat,lon,N,P,K,TY,Treatment,var,SoilType)
+# 
+# names(ds)
+# 
+# 
+# #Reconstruct the treatments to make it standard
+# ds <- ds %>%
+#   dplyr::mutate(Treatment = case_when(
+#     N != 0 | P != 0 | K != 0 ~ paste0("N", N, ",P", P, ",K", K),
+#     TRUE ~ "control"
+#   ))
+# 
+# 
+# ds$Treatment <- as.factor(ds$Treatment)
+# unique(ds$Treatment)
+# 
+# write.csv(ds, paste(pathOut2,"nigeria_maiz_clean_df.csv",sep=""), row.names = F)
+# 
+
+```
+
+# Exploratory Data Analysis (EDA)
+
+```{r cache=FALSE,warning=FALSE}
+
+ds <- read_csv(paste(pathOut2,"nigeria_maiz_clean_df.csv",sep=""))
+
+# Summarize and explore data to view the number of trials per treatment in each soil type
+df3 <- ds %>% 
+  dplyr::group_by(Treatment,SoilType) %>% 
+  dplyr::summarise(total_count=n(),.groups = 'drop') %>% 
+  dplyr::arrange(desc(total_count)) %>%
+  as.data.frame()
+
+df3
+
+sapply(ds, function(x) mean(is.na(x)) * 100)
+
+df3_2 <- ds %>% 
+  dplyr::group_by(Treatment, SoilType) %>% 
+  dplyr::summarise(total_count = n(), mean_TY = round(median(TY)), .groups = 'drop') %>% 
+  dplyr::arrange(desc(mean_TY)) %>%
+  as.data.frame()
+df3_2
+
+df4 <- ds %>%
+  dplyr::group_by(SoilType, N, P, K,var) %>%
+  dplyr::summarize(combination_count = n())%>%
+  as.data.frame()
+df4
+
+
+#plot showing yield ranges by variety and different data sources:
+bplotyield <- ds %>%
+  ggplot(aes(x = var, y = TY)) +
+  geom_boxplot() +
+  facet_wrap(~SoilType, scales="free_y", ncol=1) +
+  coord_flip()+
+  theme_bw()+
+  #theme_gray()+
+  ylab("\nMaize yield [kg/ha]")+
+  theme(axis.title.x = element_text(size = 15, face="bold"),
+        axis.title.y = element_blank(),
+        axis.text = element_text(size = 14),
+        strip.text = element_text(size = 14, face="bold", hjust=0))
+bplotyield
+
+
+#plot showing yield ranges byTreatment and different soil type:
+bplotyield1 <- ds %>%
+  ggplot(aes(x = Treatment, y = TY)) +
+  geom_boxplot() +
+  facet_wrap(~SoilType, scales="free_y", ncol=1) +
+  coord_flip()+
+  theme_bw()+
+  #theme_gray()+
+  ylab("\nMaize yield [kg/ha]")+
+  theme(axis.title.x = element_text(size = 15, face="bold"),
+        axis.title.y = element_blank(),
+        axis.text = element_text(size = 14),
+        strip.text = element_text(size = 14, face="bold", hjust=0))
+bplotyield1
+
+
+#density plot showing yield ranges by soil type:
+
+densityplot <- ds %>%
+  ggplot(aes(x = TY,
+             colour=paste0(SoilType),
+             fill=paste0(SoilType)
+  )) +
+  geom_density(alpha=.2, linewidth=1) +
+  facet_wrap(~SoilType, scales="free_y", ncol=1) +
+  theme_gray()+
+  xlab("\nMaize yield [kg/ha]")+
+  ylab("Density")+
+  theme_bw()+
+  theme(axis.title = element_text(size = 15, face="bold"),
+        axis.text = element_text(size = 14),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 14),
+        strip.text = element_text(size = 14, face="bold", hjust=0))
+densityplot
+
+#plot showing variation in yield as affected by NPK rate by soil type:
+gg2 <- ds %>%
+  gather(nutrient, rate, N:K) %>%
+  mutate(nutrient = factor(nutrient, levels=c("N", "P", "K"))) %>%
+  ggplot(aes(rate, TY)) + 
+  geom_point(alpha=.33, shape=16) +
+  facet_grid(nutrient ~ SoilType) + 
+  ggtitle("Yield distribution by soil type")+
+  xlab("\nFertilizer nutrient application rate [kg/ha]") +
+  ylab("Observed Maize yield [kg/ha]\n") +
+  theme(axis.title = element_text(size = 14, face="bold"),
+        axis.text = element_text(size = 14),
+        strip.text = element_text(size = 14, face="bold"),
+        plot.title = element_text(hjust = 0.5, size=16))
+gg2
+
+```
+
+
+## spatial prediction
+load covaraite both soil and climate 
+
+```{r cache=FALSE,warning=FALSE}
+nga_cov <- raster::stack("../data/Nigeria/covariates/nga_cov.tif")
+names(nga_cov) <- c( "slope","bdod","cec","clay","nitrogen","ocd","phh2o","sand","silt","soc","BIO1","BIO2",    
+                     "BIO3","BIO4","BIO5","BIO6","BIO7","BIO8","BIO9","BIO10","BIO11","BIO12","BIO13","BIO14",  
+                     "BIO15","BIO16","BIO17","BIO18","BIO19")
+ds <- read.csv("../data/Nigeria/maize/raw/nigeria_maiz_clean_df.csv")[,-c(1,8:10)]
+points_train <- dplyr::select(ds, -c("lon","lat"))
+coordinates(ds) <- ~lon+lat
+proj4string(ds) <- proj4string(nga_cov)
+
+
+grid_val <- raster::extract(nga_cov, ds)
+cov_train <- cbind(grid_val, points_train) # covariates, yield & nps
+cov_train <- cov_train[complete.cases(cov_train),]
+yield_nps <- dplyr::select(cov_train, c("N","P","K", "TY"))
+cov_train <- dplyr::select(cov_train, -c("N","P","K", "TY"))
+cov_train <- cbind(cov_train, yield_nps)
+cov_train <- unique(na.omit(cov_train[, 1:ncol(cov_train)])) #removing NAs and duplicates
+
+save(cov_train, file = paste0(pathOut1,"regression_matrix", ".RData"))
+
+# training
+mtry <- as.integer((ncol(cov_train))/3) 
+mtry <- seq(mtry-8, mtry+8, by = 2)
+
+rf_fitControl <- trainControl(method = "repeatedcv",
+                              number = 10,
+                              repeats = 5)
+
+rf_tuneGrid <- expand.grid(.mtry = mtry,
+                           .splitrule =  "maxstat",
+                           .min.node.size = c(20, 30))
+
+inTrain <- createDataPartition(y =  cov_train$TY, p = 0.70, list = FALSE)
+training <- cov_train[inTrain,]
+testing <- cov_train[-inTrain,]
+
+message(noquote("Training the model..."))
+mod_fit <- train(
+  TY ~ .,
+  data = training,
+  method = "ranger",
+  trControl = rf_fitControl,
+  importance = 'impurity',
+  tuneGrid = rf_tuneGrid,
+  preProcess = c('scale', 'center'))
+
+# setwd(workspace)
+save(mod_fit, file = paste0("model", ".RData"), Overwrite = T)
+# load(file = "./output/model.RData")
+# ------------------------------------------------------------------------------  
+# Plot and save variable importance and testing
+var_imp <- varImp(mod_fit)
+ggplot(var_imp)
+
+ggsave(filename = "variable_importance.png", width = 20, height = 10)
+```
+# ------------------------------------------------------------------------------  
+
+Based on variable of importance the following covariats more explain 
+
+```{r cache=FALSE,warning=FALSE}
+var_c <- c("nitrogen", "silt","phh2o","BIO3","BIO13","BIO5","bdod","cec","sand","BIO11")
+
+nga_cov <- raster::stack(paste0("data/Nigeria/covariates/",var_c ,".tif"))
+grid_val <- raster::extract(nga_cov, ds)
+cov_train <- cbind(grid_val, points_train) # covariates, yield & nps
+cov_train <- cov_train[complete.cases(cov_train),]
+yield_nps <- dplyr::select(cov_train, c("N","P","K", "TY"))
+cov_train <- dplyr::select(cov_train, -c("N","P","K", "TY"))
+cov_train <- cbind(cov_train, yield_nps)
+cov_train <- unique(na.omit(cov_train[, 1:ncol(cov_train)])) #removing NAs and duplicates
+inTrain <- createDataPartition(y =  cov_train$TY, p = 0.70, list = FALSE)
+training <- cov_train[inTrain,]
+testing <- cov_train[-inTrain,]
+# training
+mtry <- as.integer((ncol(cov_train))/3) 
+mtry <- seq(mtry-2, mtry+2, by = 2)
+
+message(noquote("Training the model based on the selcetd variables "))
+mod_fit <- train(
+  TY ~ .,
+  data = training,
+  method = "ranger",
+  trControl = rf_fitControl,
+  importance = 'impurity',
+  tuneGrid = rf_tuneGrid,
+  preProcess = c('scale', 'center'))
+
+# Multiple iteration
+
+N <- c(seq(0, 75, 15), seq(100, 200, 25)) 
+P <- K <- N[1:7]
+# P <- K <- N[1:3]
+npk <- expand.grid(N = N, P = P, K = K)
+
+path <- paste0(pathOut1,"avg_yield")
+dir.create(path, FALSE, TRUE)
+
+a <- apply(npk, 1, function(i) paste(i, collapse="."))
+f <- file.path(path, paste0("yield.", a, ".tif"))
+
+# message(noquote("Predicting ..."))
+message(noquote("Predicting yield"))
+#progress bar
+n_iter <- nrow(npk)
+pb <- txtProgressBar(min = 0, max = n_iter, style = 3, width = 50, char = "=")
+for (i in 1:nrow(npk)) {
+  # progress(i, progress.bar=TRUE)
+  if (file.exists(f[i])) next
+  NPK <- data.frame(n = npk$N[i], p = npk$P[i], k = npk$K[i])
+  predict(
+    nga_cov, 
+    mod_fit,
+    const = NPK,
+    filename = f[i],
+    overwrite = TRUE,
+    wopt = list(datatype = "INT2S", names = a[i])
+  )
+  # if (i == nrow(npk)) message("Done!")
+  setTxtProgressBar(pb, i)
+}
+close(pb)
+```
+
+## optimal yeid prediction
+
+```{r cache=FALSE,warning=FALSE}
+# list raster files
+message(noquote("Reading covarait rasters ..."))
+
+rfiles <- list.files(path = paste0(pathOut1,"avg_yield"), pattern = ".tif$", all.files = T)
+yield_ras <- lapply(rfiles, raster)
+yield_stack <- stack(yield_ras)
+
+message(noquote("Generating optimal yield ..."))
+optimal_yield <- max(yield_stack)
+
+writeRaster(
+  optimal_yield,
+  filename = paste0(pathOut1,"maize_optimal_yield_avg.tif"),
+  format = "GTiff",
+  overwrite = TRUE)
+
+grid <- as(optimal_yield, "SpatialGridDataFrame")
+grid2 <- as.data.frame(grid)
+# ------------------------------------------------------------------------------
+# generate n, p, s layer that generates the optimal yield
+vals <- values(yield_stack) # creates a matrix
+vals[is.na(vals)] <- -1 # changing NA values to -1
+col_vals <- colnames(vals)[max.col(vals, ties.method = "first")] # selects the max value column
+
+# capture layer names and change to data frame
+nps_df <-
+  strcapture(
+    pattern = "(.*?).([[:digit:]]+).([[:digit:]]+).([[:digit:]]+)",
+    # pattern = "(.*?).([[:digit:]]+).([[:digit:]]+)",
+    col_vals,
+    proto = data.frame(
+      chr = character(),
+      n = integer(),
+      p = integer(),
+      k = integer()
+    )
+  )
+message(noquote("Generating raster and csv files ..."))
+# create a csv file for the layers
+n_layer <- p_layer <- k_layer <- raster(optimal_yield)
+values(n_layer) <- nps_df$n
+values(p_layer) <- nps_df$p
+values(k_layer) <- nps_df$k
+
+n_layer2 <- mask(n_layer, optimal_yield)
+p_layer2 <- mask(p_layer, optimal_yield)
+k_layer2 <- mask(k_layer, optimal_yield)
+
+writeRaster(n_layer2, filename = "maize_n_avg", format = "GTiff", overwrite = T)
+writeRaster(p_layer2, filename = "maize_p_avg", format = "GTiff", overwrite = T)
+
+n <- as(n_layer2, "SpatialGridDataFrame")
+n <- as.data.frame(n)
+p <- as(p_layer2, "SpatialGridDataFrame")
+p <- as.data.frame(p)
+k <- as(k_layer2, "SpatialGridDataFrame")
+k <- as.data.frame(k)
+
+
+# csv_optimal <- cbind(grid2[,1], n[,1], p[1], s)
+csv_optimal <- cbind(grid2[,1], n[,1], p[,1], k)
+colnames(csv_optimal) <- c("optimal_yield","n","p","k","lon","lat")
+write.csv(csv_optimal,
+          file = "maize_optimal_yield_avg.csv",
+          row.names = F,
+          sep = ",")
+
+```
+
+## Attainable yield prediction
+
+```{r cache=FALSE,warning=FALSE}
+n <- raster("maize_n_average.tif")
+p <- raster("maize_p_average.tif")
+k <- raster("maize_k_average.tif")
+# s <- raster("maize_S_potential.tif")
+yield_pot <- raster("maize_optimal_yield_avg.tif")
+
+# ------------------------------------------------------------------------------ 
+# stack rasters
+cov <- stack(nga_cov, n,p, k, yield_pot)
+names(cov)[29:32] <- c("n", "p","k", "yield")
+
+# ------------------------------------------------------------------------------
+# extracting values by points
+message(noquote("Extracting raster values ..."))
+grid_val <- extract(cov, points)
+grid_val <- as.data.frame(grid_val)
+grid_val <-  unique(na.omit(grid_val[, 1:ncol(grid_val)]))
+
+inTrain <- sample(nrow(grid_val), 0.8 * nrow(grid_val))
+Xtraining     <- grid_val[inTrain,c(1:31)]
+Xtesting      <- grid_val[-inTrain,c(1:31)]
+Ytraining     <- grid_val[inTrain,32]
+Ytesting      <- grid_val[-inTrain,32]
+
+message(noquote("Training the model ..."))
+mod_fit <- quantregForest(x = Xtraining, y = Ytraining)
+
+message(noquote("Predicting attainable yield ..."))
+pred_90 <- predict(object = cov, model = mod_fit, what =  0.95)
+
+message(noquote("Writing rasters and csv files ..."))
+
+writeRaster(
+  pred_90,
+  filename = "maize_attainable_yield_avg_nga.tif",
+  format = "GTiff",
+  overwrite = TRUE)
+
+pred_sgdf <- as(pred_90, "SpatialGridDataFrame") 
+pred_sgdf <- as.data.frame(pred_sgdf)
+n <- as(n, "SpatialGridDataFrame")
+n <- as.data.frame(n)
+p <- as(p, "SpatialGridDataFrame")
+p <- as.data.frame(p)
+k <- as(k, "SpatialGridDataFrame")
+k <- as.data.frame(k)
+
+csv_attainable <- cbind(pred_sgdf[,1], n[,1], p[,1], k)
+
+colnames(csv_attainable) <- c("attainable_yield","n","p","k","lon","lat")
+write.csv(csv_attainable, file = "maize_attainable_yield_avg_nga.csv", row.names = F, sep = ",")
+
+```
+
+
+## Recomndation 
+For this exercise purposes, I utilized bioclimate variables. However, these variables still face challenges in accurately representing the crop growing season. To overcome this issue in the near future, I'll develop extreme indices based on the cropping calendar. The current data lacks specific planting and harvesting dates, as seen in the missing data analysis. Therefore, it would be much better to use the SPAM cropping calendar.
+
+Once this data is prepared, it will enable us to make fertilizer recommendations by integrating with the ENSO phenomenon. The main reason for this is that the ENSO phenomenon has a much better predictive capacity at different lead times compared to dynamic model-based, which always have a short lead time for seasonal predictions. This will facilitate input preparation for both farmers and policymakers, ensuring the availability of the required fertilizer in advance
