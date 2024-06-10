@@ -10,8 +10,7 @@ library(geodata)
 
 ### download covariates variable from isric data hub for soil and bioclimate and elevation and Nigeria admin data from the the global admin data 
 
-work_dir <- "~/Desktop/CIAT_JobApplication/Candidate_Test"
-work_dir <- "/media/jemal/EIAR_ASIS/CIAT_JobApplication/Candidate_Test"
+work_dir <- ""
 setwd(work_dir)
 #### isric soil data 
 out_dir <- "data/isric/"
@@ -100,7 +99,7 @@ writeRaster(x = nga_cov,
 # https://ldas.gsfc.nasa.gov/gldas/soils
 # This data uses the FAO 16-category soil texture class 
 
-soil_txture_class <- raster("~/Downloads/GLDASp5_soiltexture_025d.nc4")
+soil_txture_class <- raster("../data/GLDASp5_soiltexture_025d.nc4")
 
 coordinates(selected_data) <- c("longitude","latitude")
 soilclass = raster::extract(soil_txture_class,selected_data, convert = T,df=T)
