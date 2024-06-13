@@ -27,8 +27,8 @@ This repository contains the code and documentation for developing tailored fert
 
 1. **Clone the repository:**
    ```sh
-   git clone https://github.com/yourusername/maize-fertilizer-nigeria.git
-   cd maize-fertilizer-nigeria
+   git clone https://github.com/yourusername/Nigeria_fertilizer.git
+   cd Nigeria_fertilizer
    ```
 
 2. **Install required Python packages:**
