@@ -1,6 +1,6 @@
 ---
 title: "Developing Climate-Smart Fertilizer Recommendations for Maize Growers in Nigeria"
-author: "Your Name"
+author: "Jemal S. Ahmed"
 date: "2024-06-09"
 output: html_document
 ---
